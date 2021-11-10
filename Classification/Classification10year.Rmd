@@ -1,0 +1,139 @@
+---
+title: "Classification"
+author: "Ryan Finegan"
+date: "11/9/2021"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(caret)
+library(MASS)
+library(glmnet)
+library(class)
+
+setwd("/Users/ryanfinegan/Documents")                # my working directory
+df<-read.csv("10yrforecasting_r.csv")                # file for 10 year prediction
+dates <- as.POSIXct(df$Dates, format = "%m/%d/%Y")   # converting to get just the year
+df$Dates<-format(dates, format="%Y")                 # getting the year in dates
+
+### percentage 10 year is down or up
+prop.table(table(df$direction))   
+```
+
+```{r}
+### Logistic Regression with 10 year rates lagged
+log_regr <- glm(direction ~ tenlag1 + tenlag2 + tenlag3 + tenlag4 + tenlag5,
+               data = df, 
+               family = "binomial")
+### 10 yr derivatives
+log_regr_d <- glm(direction ~ tenderivativelag1 + tenderivativelag2 + tenderivativelag3 + tenderivativelag4 + tenderivativelag5,
+                data = df, 
+                family = "binomial")
+### Logistic Regression with MOVE Index lags
+log_regr_move <- glm(direction ~ movelag1 + movelag2 + movelag3 + movelag4 + movelag5,
+               data = df, 
+               family = "binomial")
+### Logistic Regression with MOVE Index derivatives
+log_regr_move_d <- glm(direction ~ movederivativelag1 + movederivativelag2 + movederivativelag3 + movederivativelag4 + movederivativelag5,
+                     data = df, 
+                     family = "binomial")
+### Logistic Regression with 30 year lags
+log_regr_30 <- glm(direction ~ thirtylag1 + thirtylag2 + thirtylag3 + thirtylag4 + thirtylag5,
+                data = df, 
+                family = "binomial")
+### Logistic Regression with 30 year lags
+log_regr_30_d <- glm(direction ~ thirtyderivativelag1 + thirtyderivativelag2 + thirtyderivativelag3 + thirtyderivativelag4 + thirtyderivativelag5,
+                   data = df, 
+                   family = "binomial")
+### Logistic Regression with DXY lags
+log_regr_dxy <- glm(direction ~ dxylag1 + dxylag2 + dxylag3 + dxylag4 + dxylag5,
+                   data = df, 
+                   family = "binomial")
+### Logistic Regression with DXY lags
+log_regr_dxy_d <- glm(direction ~ dxyderivativelag1 + dxyderivativelag2 + dxyderivativelag3 + dxyderivativelag4 + dxyderivativelag5,
+                    data = df, 
+                    family = "binomial")
+```
+
+```{r}
+summary(log_regr)           # 10 yr lag 1 is 0.06 p value
+summary(log_regr_d)         # 10 yr derivative lag 5 is significant
+summary(log_regr_move)      # move lag 5 was significant
+summary(log_regr_move_d)    # move derivative lag1 (move derivative lag 5 p value was 0.057)
+summary(log_regr_30)        # 30 lag 1 is significant
+summary(log_regr_30_d)      # 30 derivative lag 4 and 5 close (p value 0.051 and 0.052)
+summary(log_regr_dxy)       # nothing is significant
+summary(log_regr_dxy_d)     # nothing is significant
+```
+
+```{r}
+### Model with all significant and close to significant
+log_regr_mod<-glm(direction ~ tenlag1 + tenderivativelag5 + movelag5 + movederivativelag1 + movederivativelag5 + thirtylag1 + thirtyderivativelag4 + thirtyderivativelag5,
+                  data = df, 
+                  family = "binomial")
+predicted <- factor(ifelse(predict(log_regr_mod, type = "response") < 0.5, "Down", "Up"))
+confusionMatrix(predicted, df$direction, positive = "Up")
+prop.table(table(predicted))    # predicted about 73% down
+```
+
+```{r}
+### Model with move significant and close to significant
+train <- df[df$Dates < 2015, ]
+test <- df[df$Dates > 2015, ]
+log_regr_mod<-glm(direction ~ movederivativelag1 + thirtylag1 + tenlag1,
+                  data = train, 
+                  family = "binomial")
+predicted <- factor(ifelse(predict(log_regr_mod, newdata = test, type = "response") < 0.5, "Down", "Up"))
+confusionMatrix(predicted, test$direction, positive = "Up")
+```
+
+```{r}
+### LDA
+lda_dir <- lda(direction ~ tenderivativelag5 + movederivativelag5, data = train)
+predicted_lda <- predict(lda_dir, newdata = test)
+confusionMatrix(data = predicted_lda$class,reference = test$direction, positive = "Up")
+```
+
+```{r}
+### QDA 
+qda_dir <- qda(direction ~ movederivativelag1 + tenlag1 + thirtylag1, data = train)
+predicted_qda <- predict(qda_dir, newdata = test)
+confusionMatrix(data = predicted_qda$class, 
+                reference = test$direction, 
+                positive = "Up")
+```
+
+```{r}
+### KNN
+trainKnn=cbind(train$movederivativelag1,train$tenlag1,train$thirtylag1)
+testKnn=cbind(test$movederivativelag1,test$tenlag1,test$thirtylag1)
+treas.knn=knn(trainKnn, testKnn, train$direction, k=1)
+table(treas.knn,test$direction)
+mean(treas.knn == test$direction)
+```
+
+```{r}
+
+### Experiment Further
+train = subset(train, select = -c(ten,tenderivative,thirtyderivative,thirty,movederivative,
+                move,dxyderivative,dxy) ) # getting rid of variables that aren't lagged
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 5,
+                     repeats = 5)
+set.seed(111)
+knn_train <- train(y = train$direction,
+                   x = train[,-c(1,2)],
+                   method = "knn",
+                   metric = "Accuracy",
+                   preProcess = c("center", "scale"),
+                   tuneGrid = expand.grid(k = seq(1, 50, 2)),
+                   trControl = ctrl)
+
+varImp(knn_train) ### movelag1, movederivativelag1, tenlag5, tenderivativelag5
+knn_train
+knn_pred <- predict(knn_train, newdata = test)
+confusionMatrix(data = knn_pred, 
+                reference = test$direction, 
+                positive = "Up")
+```
