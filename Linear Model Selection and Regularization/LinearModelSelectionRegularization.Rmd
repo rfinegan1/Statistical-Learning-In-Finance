@@ -1,0 +1,190 @@
+---
+title: "LinearModelSelectionRegularization"
+author: "Ryan Finegan"
+date: "11/1/2021"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(caret)
+library(MASS)
+library(glmnet)
+library(class)
+set.seed(5)
+setwd("/Users/ryanfinegan/Documents")                # my working directory
+df<-read.csv("10yearforecasting.csv")                # file for 10 year prediction
+dates <- as.POSIXct(df$Dates, format = "%m/%d/%Y")   # converting to get just the year
+df$Dates<-format(dates, format="%Y")                 # getting the year in dates
+df<-df[-1,]                                          # getting rid of the first row because zeros
+df = subset(df, select = -c(thirtyderivative,thirty,movederivative,
+                                  move,dxyderivative,dxy) ) 
+train <- df[df$Dates < 2015, ]             # splitting at the 2015 mark
+test <- df[df$Dates > 2015, ]              # splitting at 2015
+train = subset(train, select = -c(Dates) ) # getting rid of Dates
+test = subset(test, select = -c(Dates) )   # getting rid of Dates
+# tenderivativelag1 + thirtylag5 + dxylag1 + dxylag2 + movelag2 + movelag1 + tenlag2
+df<-subset(df, select = -c(Dates) )        # getting rid of Dates
+ten.year.lm <- lm(ten ~ ., data = train)   # mlr model on training data
+summary(ten.year.lm)                       # regression statistics
+```
+
+```{r}
+ols.prediction <- predict(ten.year.lm, test)      # getting the MSE for the OLS method
+(ols.mse <- mean((ols.prediction - test$ten)^2))  # the predictions on the test data split vs actual
+```
+
+```{r}
+library(dplyr)
+# tenderivativelag1 + thirtylag5 + dxylag1 + dxylag2 + movelag2 + movelag1 + tenlag2
+train.matrix <- dummyVars(ten ~ ., data = train, fullRank = F) %>%
+  predict(newdata = train) %>%
+  as.matrix()
+# tenderivativelag1 + thirtylag5 + dxylag1 + dxylag2 + movelag2 + movelag1 + tenlag2
+test.matrix <- dummyVars(ten ~ ., data = test, fullRank = F) %>%
+  predict(newdata = test) %>%
+  as.matrix()
+# ridge has an alpha of zero and the coefficients never shrink to zero
+mod.ridge <- cv.glmnet(y = train$ten, 
+                         x = train.matrix, 
+                         alpha = 0, 
+                         lambda = 10^seq(2,-2, length = 100), 
+                         standardize = TRUE, 
+                         nfolds = 5)
+
+data.frame(lambda = mod.ridge$lambda, 
+           cv_mse = mod.ridge$cvm) %>%
+  ggplot(aes(x = lambda, y = cv_mse)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_vline(xintercept = mod.ridge$lambda.min, col = "deepskyblue3") +
+  geom_hline(yintercept = min(mod.ridge$cvm), col = "deepskyblue3") +
+  scale_x_continuous(trans = 'log10', breaks = c(0.01, 0.1, 1, 10, 100), labels = c(0.01, 0.1, 1, 10, 100)) + 
+  scale_y_continuous(labels = scales::comma_format()) + 
+  theme(legend.position = "bottom") + 
+  labs(x = "Lambda", 
+       y = "CV MSE", 
+       col = "Coefficients:",          # Coefficients - Can't be zero because Ridge Regression
+       title = "Ridge Regression")     # Lambda Selection with 5 CV
+```
+
+```{r}
+### Using lambda selection model above
+mod.ridge.best <- glmnet(y = train$ten,
+                           x = train.matrix,
+                           alpha = 0, 
+                           lambda = 10^seq(2,-2, length = 100))
+
+ridge.prediction <- predict(mod.ridge.best, s = mod.ridge$lambda.min, newx = test.matrix)
+(ridge.coef <- predict(mod.ridge.best, type = "coefficients", s = mod.ridge$lambda.min))
+(ridge.mse <- mean((ridge.prediction - test$ten)^2))
+```
+
+```{r}
+model.lasso <- cv.glmnet(y = train$ten, x = train.matrix, alpha = 1, lambda = 10^seq(2, -2,length = 100), standardize = TRUE, nfolds = 5, thresh = 1e-12)
+data.frame(lambda = model.lasso$lambda, 
+           cv_mse = model.lasso$cvm, 
+           nonzero_coeff = model.lasso$nzero) %>%
+  ggplot(aes(x = lambda, y = cv_mse, col = nonzero_coeff)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_vline(xintercept = model.lasso$lambda.min, col = "deepskyblue3") +
+  geom_hline(yintercept = min(model.lasso$cvm), col = "deepskyblue3") +
+  scale_x_continuous(trans = 'log10', breaks = c(0.01, 0.1, 1, 10, 100), labels = c(0.01, 0.1, 1, 10, 100)) + 
+  scale_y_continuous(labels = scales::comma_format()) + 
+  theme(legend.position = "bottom") + 
+  scale_color_gradient(low = "red", high = "green") +
+  labs(x = "Lambda", 
+       y = "CV MSE", 
+       col = "Coefficients:", 
+       title = "Lasso Lambda Selection")
+### Lambda Selection for Lasso Regression
+```
+
+```{r}
+model.lasso.best <- glmnet(y = train$ten,x = train.matrix,alpha = 1, lambda = 10^seq(2,-5, length = 100))    # alpha at one is a lasso regression
+lasso.prediction <- predict(model.lasso.best, s = model.lasso$lambda.min, newx = test.matrix)
+(lasso.mse <- mean((lasso.prediction - test$ten)^2))   # MSE for Lasso Regression
+# getting the coefficients below
+lasso.weights <- predict(model.lasso.best, type = "coefficients", s = model.lasso$lambda.min)
+lasso.weights
+```
+
+```{r}
+# principal components regression
+library(pls)
+# tenderivativelag1 + thirtylag5 + dxylag1 + dxylag2 + movelag2 + movelag1 + tenlag2
+model.princ <- pcr(ten ~ .,data = train, scale = T, validation = "CV")
+model.princ.mse <- MSEP(model.princ, estimate = "CV")$val %>%
+  reshape2::melt() %>%
+  mutate(M = 0:(nrow(.)-1)) %>%
+  select(M, value) %>%
+  rename(CV_MSE = value)
+model.princ.mse
+```
+
+```{r}
+model.princ.mse %>%
+  mutate(min_CV_MSE = as.numeric(min(CV_MSE) == CV_MSE)) %>%
+  ggplot(aes(x = M, y = CV_MSE)) + 
+  geom_line(col = "grey55") + 
+  geom_point(size = 2, aes(col = factor(min_CV_MSE))) + 
+  scale_y_continuous(labels = scales::comma_format()) + 
+  scale_color_manual(values = c("deepskyblue3", "green")) + 
+  theme(legend.position = "none") + 
+  labs(x = "M", 
+       y = "Cross-Validation MSE", 
+       col = "Non-Zero Coefficients:", 
+       title = "PCR - M Selection (Using 10-Fold Cross-Validation)")
+### Cross Validation picked M = 7
+```
+
+```{r}
+princ.pred <- predict(model.princ, test, ncomp = 24)
+(princ.mse <- mean((princ.pred - test$ten)^2))
+```
+
+```{r}
+# tenderivativelag1 + thirtylag5 + dxylag1 + dxylag2 + movelag2 + movelag1 + tenlag2
+mod.partial <- plsr(ten ~ .,data = train, scale = T, validation = "CV")
+mod.partial.mse <- MSEP(mod.partial, estimate = "CV")$val %>%
+  reshape2::melt() %>%
+  mutate(M = 0:(nrow(.)-1)) %>%
+  select(M, value) %>%
+  rename(CV_MSE = value)
+mod.partial.mse
+```
+
+```{r}
+mod.partial.mse %>%
+  mutate(min_CV_MSE = as.numeric(min(CV_MSE) == CV_MSE)) %>%
+  ggplot(aes(x = M, y = CV_MSE)) + 
+  geom_line(col = "grey55") + 
+  geom_point(size = 2, aes(col = factor(min_CV_MSE))) + 
+  scale_y_continuous(labels = scales::comma_format()) + 
+  scale_color_manual(values = c("deepskyblue3", "green")) + 
+  theme(legend.position = "none") + 
+  labs(x = "M", 
+       y = "Cross-Validation MSE", 
+       title = "PLS - M Selection (Using 10-Fold Cross-Validation)")
+```
+
+```{r}
+partial.pred <- predict(mod.partial, test, ncomp = 14)
+(partial.mse <- mean((partial.pred - test$ten)^2))
+```
+
+```{r}
+### Model Comparison
+tss <- sum((test$ten - mean(test$ten))^2)    # total sum of squares
+### data frame with the five models used before
+data.frame(method = c("OLS", "Ridge", "Lasso", "PCR", "PLS"), 
+           test.mean.squared.errors = c(ols.mse, ridge.mse, lasso.mse, princ.mse, partial.mse), 
+           test.r2 = c(1 - sum((test$ten - ols.prediction)^2) / tss,
+                       1 - sum((test$ten- ridge.prediction)^2) / tss, 
+                       1 - sum((test$ten - lasso.prediction)^2) / tss, 
+                       1 - sum((test$ten - princ.pred)^2) / tss, 
+                       1 - sum((test$ten - partial.pred)^2) / tss)) %>%
+  arrange(test.mean.squared.errors)
+```
+
