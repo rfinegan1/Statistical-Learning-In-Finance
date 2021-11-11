@@ -1,0 +1,182 @@
+---
+title: "Ensemble Methods"
+author: "Ryan Finegan"
+date: "11/8/2021"
+output: html_document
+---
+
+```{r}
+### train / test split 
+library(ggplot2)
+library(caret)
+library(MASS)
+library(glmnet)
+library(class)
+library(tree)
+library(dplyr)
+setwd("/Users/ryanfinegan/Documents")                # my working directory
+set.seed(3, sample.kind = "Rounding")                # getting similar results
+df<-read.csv("10yearforecasting.csv")                # file for 10 year prediction
+dates <- as.POSIXct(df$Dates, format = "%m/%d/%Y")   # converting to get just the year
+df$Dates<-format(dates, format="%Y")                 # getting the year in dates
+df<-df[-1,]                                          # getting rid of the first row because zeros
+df = subset(df, select = -c(thirtyderivative,thirty,movederivative,
+                                  move,dxyderivative,dxy) ) 
+df=subset(df,select=c(Dates,ten,tenlag1,tenlag5,movelag1,movelag5,tenderivativelag1,tenderivativelag5,movederivativelag1,movederivativelag5,thirtyderivativelag1,thirtyderivativelag5))
+train <- df[df$Dates < 2015, ]             # splitting at the 2015 mark
+test <- df[df$Dates > 2015, ]              # splitting at 2015
+train = subset(train, select = -c(Dates) ) # getting rid of Dates
+test = subset(test, select = -c(Dates) )   # getting rid of Dates
+df<-subset(df, select = -c(Dates) )        # getting rid of Dates
+df
+```
+
+```{r}
+### basic tree
+tree <- tree(ten ~ ., train)
+plot(tree)
+text(tree, pretty = 0, cex = 0.7)
+```
+
+```{r}
+summary(tree)   # statistical summary of the basic tree
+```
+
+```{r}
+test.pred <- predict(tree, test)
+mean((test.pred - test$ten)^2)
+```
+
+```{r}
+### cross validation pruning
+cv.tree.mod <- cv.tree(tree, K = 10)
+data.frame(n_leaves = cv.tree.mod$size,CV_RSS = cv.tree.mod$dev) %>%
+  mutate(min_CV_RSS = as.numeric(min(CV_RSS) == CV_RSS)) %>%
+  ggplot(aes(x = n_leaves, y = CV_RSS)) +
+  geom_line(col = "deepskyblue3") +
+  geom_point(size = 2, aes(col = factor(min_CV_RSS))) +
+  scale_x_continuous(breaks = seq(1, 17, 2)) +
+  scale_y_continuous(labels = scales::comma_format()) +
+  scale_color_manual(values = c("red", "green")) +
+  theme(legend.position = "none") +
+  labs(title = "Ten Year Yield Dataset",
+       subtitle = "Finding complexity parameter with CV",
+       x = "Nodes",
+       y = "CV RSS")
+```
+
+```{r}
+### 8 is the best terminal node
+pruned.tree <- prune.tree(tree, best = 8)
+test.pred <- predict(pruned.tree, test)
+mean((test.pred - test$ten)^2)
+```
+
+```{r}
+data.frame(size = cv.tree.mod$size, 
+           dev = cv.tree.mod$dev, 
+           k = cv.tree.mod$k)
+```
+
+```{r}
+### bagging trees like random forests (these reduce variance (helps avoid over fitting))
+# sometimes random forests not only reduce variance but also bias remains unchanged
+library(randomForest)
+rfr <- randomForest(y = train$ten, x = train[ ,-1], mtry = ncol(train) - 1, importance = T) 
+rfr  # you minus one to account for the target variable of the ten year yield 
+```
+
+```{r}
+test.pred <- predict(rfr, test)
+mean((test.pred - test$ten)^2)
+```
+
+```{r}
+### show feature importance in the model
+importance(rfr)
+```
+
+```{r}
+test_MSE <- c()
+total <- 1
+### went from one to ten because that is the number of predictors
+for (Mtry in 1:10) {
+  set.seed(3)
+  rf_temp <- randomForest(y = train$ten, x = train[ ,-1], mtry = Mtry, importance = T)
+  test_pred <- predict(rf_temp, test)
+  test_MSE[total] <- mean((test_pred - test$ten)^2)
+  total <- total + 1
+}
+data.frame(mtry = 1:10, test_MSE = test_MSE) %>%
+  mutate(min_test_MSE = as.numeric(min(test_MSE) == test_MSE)) %>%
+  ggplot(aes(x = mtry, y = test_MSE)) +
+  geom_line(col = "deepskyblue3") +
+  geom_point(size = 1, aes(col = factor(min_test_MSE))) +
+  scale_x_continuous(breaks = seq(1, 10), minor_breaks = NULL) +
+  scale_color_manual(values = c("red", "green")) +
+  theme(legend.position = "none") +
+  labs(title = "Ten Year Yield RFR",
+       subtitle = "Find MTRY using test MSE",
+       x = "MTRY",
+       y = "Test MSE")
+```
+
+```{r}
+tail(test_MSE, 10)  # the last of tenth mtry performed with the lowest MSE on the test data set
+importance(rf_temp)
+```
+
+```{r}
+### lets look at 10 year derivative because more of gaussian distribution
+setwd("/Users/ryanfinegan/Documents")                # my working directory
+df<-read.csv("10yrforecasting_r.csv")                # file for 10 year prediction
+hist(df$ten)
+```
+```{r}
+library(gbm)
+library(glmnet)
+set.seed(3)
+df.new = subset(df, select = -c(direction,thirtyderivative,thirty,movederivative,move,dxyderivative,
+                            dxy,Dates,tenderivative))
+n <- nrow(df.new)
+p <- ncol(df.new) - 1  # one column is the response we are trying to model i.e. 'tenderivative' 
+train <- 1:1200
+test <- 1201:n
+boost.ten <- gbm(ten~., data = df.new[train,],distribution = "gaussian", n.trees = 5000, interaction.depth = 4)
+summary(boost.ten)
+```
+
+
+```{r}
+### partial dependence plots
+plot(boost.ten, i = "thirtylag2")
+plot(boost.ten, i = "movelag5")
+```
+```{r}
+yhat.boost <- predict(boost.ten,newdata = df.new[test, ], n.trees = 5000)
+(mean((yhat.boost - df.new[test,]$ten)^2))
+```
+```{r}
+boost.ten <- gbm(ten ~ ., data = df.new[train, ], distribution = "gaussian", n.trees = 5000, interaction.depth = 4, shrinkage = 0.2, verbose = F)
+yhat.boost <- predict(boost.ten,newdata = df.new[test, ], n.trees = 5000)
+mean((yhat.boost - df.new[test,]$ten)^2)
+### lambda in this case at 0.2 leads to a higher MSE than lambda at 0.001
+```
+
+
+```{r}
+### Bayesian Additive Regression Trees
+### best model
+library(BART)
+set.seed(3)
+x <- df.new[, 2:(ncol(df.new))]  # getting all columns but the target variable
+y <- df.new[, "ten"]             # the target variable
+xtrain <- x[train, ]             # x train variables
+ytrain <- y[train]               # y train variables
+xtest <- x[-train, ]             # x test variables 
+ytest <- y[-train]               # y test variables 
+ten.bart.fit <- gbart(xtrain, ytrain, x.test = xtest)
+yhat.bart <- ten.bart.fit$yhat.test.mean
+mean((ytest - yhat.bart)^2)
+```
+
