@@ -1,0 +1,186 @@
+---
+title: "Support Vector Machines in Fixed Income"
+author: "Ryan Finegan"
+date: "11/11/2021"
+output: html_document
+---
+
+```{r}
+### One of the best "Out of Box" Classifiers
+# Use SVCs to predict the direction of the ten year yield deltas week to week
+library(e1071)
+library(dplyr)
+setwd("/Users/ryanfinegan/Documents")                # my working directory
+df<-read.csv("10yrforecasting_r.csv")                # file for 10 year prediction
+dates <- as.POSIXct(df$Dates, format = "%m/%d/%Y")   # converting to get just the year
+df$Dates<-format(dates, format="%Y")                 # getting the year in dates
+df.new = subset(df,select = c(direction,thirtyderivativelag1,thirtyderivativelag5,
+                              movelag1,tenderivativelag1,movederivativelag1,dxyderivativelag1,
+                              tenderivativelag5, dxyderivativelag5, movederivativelag5))
+df.new <- df.new %>%
+      mutate(direction = ifelse(direction == "Down",0,1))
+```
+
+```{r}
+# reproducible results
+set.seed(3)
+train=df.new[1:1200,]           # training split
+test=df.new[1201:nrow(df.new),] # testing split
+svc = svm(direction ~ .,data = train,cost=1,
+          type = 'C-classification',kernel = 'linear',scale=FALSE) # I didn't standardize the data
+y.pred = predict(svc, newdata = test[-1])  # predicting on everything but the target direction
+(cm=table(test[, 1], y.pred))              # confusion matrix
+correct=(cm[1,][1]+cm[2,][2])              # correct predictions
+wrong=(cm[1,][2]+cm[2,][1])                # incorrect predictions
+(acc=correct/(correct+wrong))              # accuracy
+plot(svc,train,movederivativelag1~tenderivativelag1)  # hyperplane plot given move derivative and ten year derivative
+# move derivative very high is usually subject to weekly increase in ten year
+```
+
+```{r}
+# finding the particular support vectors 
+vectors=svc$index
+summary(svc)
+```
+
+```{r}
+# changing the cost to see a difference
+set.seed(3)
+svc = svm(direction ~ .,data = train,cost=0.1,
+          type = 'C-classification',kernel = 'linear',scale=FALSE) # I didn't standardize the data
+y.pred = predict(svc, newdata = test[-1])  # predicting on everything but the target direction
+(cm=table(test[, 1], y.pred))              # confusion matrix
+correct=(cm[1,][1]+cm[2,][2])              # correct predictions
+wrong=(cm[1,][2]+cm[2,][1])                # incorrect predictions
+(acc=correct/(correct+wrong))              # accuracy
+plot(svc,train,movederivativelag1~thirtyderivativelag5)  # hyperplane plot given move derivative and ten year derivative
+
+### cost function being small will mean many or more support vectors on or violating the margin
+### cost function being large will mean few or fewer support vectors on or violating the margin
+# model just predicted all decreases (non-linear could be better)
+```
+
+
+
+
+```{r}
+### using random sampling and specific features for this part
+### splitting the data set
+set.seed(3)
+df = subset(df,select = c(direction,thirtyderivativelag1,thirtyderivativelag2,
+                          movelag1,movelag2,tenderivativelag1,
+                          movederivativelag1,dxyderivativelag1,
+                          tenderivativelag2, dxyderivativelag2, 
+                          movederivativelag2))
+train_index <- sample(1:nrow(df), 800)  # trying random sample since it's classification
+train <- df[train_index, ]              # training data split
+test <- df[-train_index, ]              # testing data split
+svm.linear <- svm(direction ~ .,        # direction dependent variable
+                  data = train,         # training data 
+                  kernel = "linear",    # linear kernel
+                  scale = T,            # scaling for True
+                  cost = 0.01)          # small cost meaning many sv's on margin/violating margin
+summary(svm.linear)                     # summary of the linear svc model
+table(train$direction[svm.linear$index])# showing the splits of up and down in the training data
+```
+
+```{r}
+# training and testing rates
+data.frame(train_error = mean(predict(svm.linear, train) != train$direction), 
+           test_error = mean(predict(svm.linear, test) != test$direction))
+```
+
+```{r}
+library(dplyr)
+set.seed(3)
+p.range <- seq(-2, 1, .2)
+c.range <- 10^p.range
+total <- 5
+iter <- 3
+cv.mat <- matrix(nrow = length(c.range), ncol = iter)
+for (i in 1:iter) {
+  svm.lin.tune <- tune(svm, direction ~ ., 
+                          data = train, kernel = "linear", scale = T, 
+                          ranges = list(cost = c.range), 
+                          tunecontrol = tune.control(sampling = "cross", cross = total))
+  cv.mat[ ,i] <- svm.lin.tune$performances$error
+}
+(svm.linear.df <- data.frame(cost = c.range, CV_error = rowMeans(cv.mat)) %>%
+  mutate(min_CV_error = as.numeric(CV_error == min(CV_error))))
+svm.linear.df %>% filter(min_CV_error == 1) %>% select(-min_CV_error) 
+```
+
+```{r}
+# lower cost => better accuracy (for this data set)
+svm.linear <- svm(direction ~ ., data = train, kernel = "linear", scale = T, cost = 10^-0.8)
+data.frame(train_error = mean(predict(svm.linear, train) != train$direction), 
+           test_error = mean(predict(svm.linear, test) != test$direction))
+```
+
+```{r}
+library(ggplot2)
+### radial kernel 
+set.seed(3)
+cp.range <- seq(-2, 1, 0.2)
+c.range <- 10^cp.range
+total <- 10
+iter <- 3
+cv.mat <- matrix(nrow = length(cp.range), ncol = iter)
+for (i in 1:iter) {
+  svm_radial_tune <- tune(svm, direction ~ ., data = train, kernel = "radial", scale = T, ranges = list(cost = c.range), tunecontrol = tune.control(sampling = "cross", cross = total))
+  cv.mat[ ,i] <- svm_radial_tune$performances$error
+}
+svm.rad.df <- data.frame(cost = svm_radial_tune$performances$cost, CV_error = rowMeans(cv.mat)) %>%
+  mutate(min_CV_error = as.numeric(CV_error == min(CV_error)))
+### minimum cost and 0.01 cost since that did well earlier
+svm.rad.1 <- svm(direction ~ ., data = train, kernel = "radial", scale = T, cost = 0.01)
+svm.rad.2 <- svm(direction ~ ., data = train, kernel = "radial", scale = T, cost = 1)
+svm.rad.df %>% filter(min_CV_error == 1 | cost == 0.01) %>% select(-min_CV_error) %>%
+  cbind(data.frame(train_error = c(mean(predict(svm.rad.1, train) != train$direction), 
+                                   mean(predict(svm.rad.2, train) != train$direction)), 
+                   test_error = c(mean(predict(svm.rad.1, test) != test$direction), 
+                                  mean(predict(svm.rad.2, test) != test$direction))))
+```
+
+```{r}
+# polynomial kernel
+cp.range <- c(seq(-2, 1, 0.2))
+c.range <- 10^cp.range
+total <- 10
+iter <- 3
+cv.mat <- matrix(nrow = length(cp.range), ncol = iter)
+set.seed(720)
+for (i in 1:iter) {
+  svm.poly.tuner <- tune(svm, direction ~ ., data = train, 
+                              kernel = "polynomial", 
+                              scale = T, 
+                              ranges = list(degree = 2, cost = c.range), 
+                              tunecontrol = tune.control(sampling = "cross", cross = total))
+  cv.mat[ ,i] <- svm.poly.tuner$performances$error
+}
+
+svm.polynomial.df <- data.frame(cost = svm.poly.tuner$performances$cost, 
+                                CV_error = rowMeans(cv.mat)) %>%
+  mutate(min_CV_error = as.numeric(CV_error == min(CV_error)))
+svm.poly.1 <- svm(direction ~ ., data = train, 
+                        kernel = "polynomial", scale = T, cost = 0.01, degree = 2)
+svm.poly.2 <- svm(direction ~ ., data = train, 
+                        kernel = "polynomial", scale = T, cost = 10, degree = 2)
+svm.polynomial.df %>% filter(cost == 10 | cost == 0.01) %>% select(-min_CV_error) %>%
+  cbind(data.frame(train_error = c(mean(predict(svm.poly.1, train) != train$direction), 
+                                   mean(predict(svm.poly.2, train) != train$direction)), 
+                   test_error = c(mean(predict(svm.poly.1, test) != test$direction), 
+                                  mean(predict(svm.poly.2, test) != test$direction))))
+```
+
+```{r}
+### best model 
+data.frame(kernel = c("Linear SVM", "Radial SVM", "Polynomial SVM"),
+           CV_error = c(min(svm.linear.df$CV_error), 
+                        min(svm.rad.df$CV_error), 
+                        min(svm.polynomial.df$CV_error)), 
+           test_error = c(mean(predict(svm.linear, test) != test$direction), 
+                          mean(predict(svm.rad.2, test) != test$direction), 
+                          mean(predict(svm.poly.2, test) != test$direction)))
+```
+
